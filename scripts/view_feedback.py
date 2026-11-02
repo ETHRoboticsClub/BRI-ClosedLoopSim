@@ -14,11 +14,11 @@ from mjviser import Viewer
 # Allow running as `python scripts/view_feedback.py` from the simulation repo.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tactile_rl.env import HandTactileEnv  # noqa: E402
-from feedback_encoding import (
+from tactile_rl.feedback import (
     FeedbackPipeline,
     SensorConfig,
     EncodingConfig,
-) # noqa: E402
+)
 
 FINGERS = ("th", "ff", "mf", "rf")  # thumb, index, middle, ring
 CYCLE_S = 4.0
