@@ -15,7 +15,7 @@ def clamp01(value: float) -> float:
 class SensorConfig:
     min_force_n: float = 0.0       # calibrated force corresponding to zero
     max_force_n: float = 3.0       # initial estimate, what we will tune to be the normalized value of 1 (max)
-    smoothing_alpha: float = 0.25  # EMA weight for NEW sample, 1 = no filtering
+    smoothing_alpha: float = 0.7  # EMA weight for NEW sample, 1 = no filtering
 
     def __post_init__(self) -> None:
         if not (0 <= self.min_force_n < self.max_force_n):

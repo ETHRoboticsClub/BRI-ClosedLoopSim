@@ -19,17 +19,34 @@ class HandTactileEnv:
         self.kf = load_keyframes(self.model)
         self.qadr = hand_joint_qpos_adr(self.model)
         self.dadr = hand_joint_dof_adr(self.model)
-        self.holder = self.model.equality("holder").id
+        self.holder = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "holder"
+        )
+        self.lift_actuator = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "hand_lift_act"
+        )
+        self.approach_actuator = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "hand_approach_act"
+        )
+        self.lift_joint = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "hand_lift"
+        )
+        self.approach_joint = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "hand_approach"
+        )
         self.n_substeps = int(round(control_dt / self.model.opt.timestep))
         self.ctrl_lo, self.ctrl_hi = self.model.actuator_ctrlrange.T
-        self.forces = FingerForces(self.model)
+        self.forces = FingerForces(self.model, object_body_id=self.model.body("object").id)
 
     # ---- API ----
-    def reset(self, seed=None):
+    def reset(self, seed=None, hand_pose="open hand"):
+        if hand_pose not in self.kf:
+            raise ValueError(f"Unknown hand keyframe: {hand_pose}")
         mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[self.qadr] = self.kf["open hand"]
-        self.data.ctrl[:] = qpos_to_ctrl(self.model, self.kf["open hand"])
-        self.data.eq_active[self.holder] = 1
+        self.data.qpos[self.qadr] = self.kf[hand_pose]
+        self.data.ctrl[:] = qpos_to_ctrl(self.model, self.kf[hand_pose])
+        if self.holder >= 0:
+            self.data.eq_active[self.holder] = 1
         mujoco.mj_forward(self.model, self.data)
         self.forces.update(self.data)
         return self._obs(), {}
@@ -51,11 +68,45 @@ class HandTactileEnv:
         return self.forces.update(self.data)
 
     def release_object(self):
-        self.data.eq_active[self.holder] = 0
+        if self.holder >= 0:
+            self.data.eq_active[self.holder] = 0
 
-    def grip_ctrl(self, alpha):
-        """Grip synergy: blend open -> closed hand (alpha~0.6-0.7 = moderate grip)."""
-        q = self.kf["open hand"] + alpha * (self.kf["close hand"] - self.kf["open hand"])
+    @property
+    def lift_height(self):
+        if self.lift_joint < 0:
+            return 0.0
+        qpos_address = self.model.jnt_qposadr[self.lift_joint]
+        return float(self.data.qpos[qpos_address])
+
+    @property
+    def approach_position(self):
+        if self.approach_joint < 0:
+            return 0.0
+        qpos_address = self.model.jnt_qposadr[self.approach_joint]
+        return float(self.data.qpos[qpos_address])
+
+    def set_lift_target(self, height):
+        if self.lift_actuator < 0:
+            raise RuntimeError("This scene does not have a hand lift actuator")
+        lower, upper = self.model.actuator_ctrlrange[self.lift_actuator]
+        self.data.ctrl[self.lift_actuator] = np.clip(height, lower, upper)
+        return float(self.data.ctrl[self.lift_actuator])
+
+    def set_approach_target(self, distance):
+        if self.approach_actuator < 0:
+            raise RuntimeError("This scene does not have a hand approach actuator")
+        lower, upper = self.model.actuator_ctrlrange[self.approach_actuator]
+        self.data.ctrl[self.approach_actuator] = np.clip(distance, lower, upper)
+        return float(self.data.ctrl[self.approach_actuator])
+
+    def grip_ctrl(self, alpha, start_pose="open hand"):
+        """Blend a starting hand pose toward closed while keeping the wrist fixed."""
+        if start_pose not in self.kf:
+            raise ValueError(f"Unknown hand keyframe: {start_pose}")
+        q_start = self.kf[start_pose]
+        q_end = self.kf["close hand"].copy()
+        q_end[:2] = q_start[:2]
+        q = q_start + alpha * (q_end - q_start)
         return qpos_to_ctrl(self.model, q)
 
     # ---- internals ----
