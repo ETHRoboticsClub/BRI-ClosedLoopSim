@@ -155,8 +155,7 @@ class GraspFeedbackEnv(gym.Env):
             reward += 1.0                                            # bonus for each step on target
         if over_force:
             reward -= 2.0                                            # over the limit hurts every step
-        reward -= 0.05 * self.grip                                   # slight preference for a lighter grip
-
+                                        
         info = {
             "fingertip_force_n": fingertip_force,
             "target_force_n": self.target_force,
