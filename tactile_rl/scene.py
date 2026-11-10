@@ -13,13 +13,16 @@ import numpy as np
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "shadow_hand"
 HAND_XML = ASSETS / "right_hand.xml"
 KEYFRAMES_XML = ASSETS / "keyframes.xml"
+BIGYM_MUG_ASSETS = ASSETS.parent / "third_party" / "bigym_mug" / "assets"
 
 HAND_PREFIX = "rh_"
+MUG_TABLE_TOP_Z = -0.08
+MUG_LIFT_MAX_M = 0.12
 
 
 @dataclass
 class ObjectSpec:
-    shape: str = "sphere"           # sphere | box | cylinder | ellipsoid
+    shape: str = "sphere"           # sphere | box | cylinder | ellipsoid | mug
     size: tuple = (0.03,)           # MuJoCo geom size (m)
     mass: float = 0.08              # kg
     friction: tuple = (1.0, 0.01, 0.001)
@@ -42,28 +45,176 @@ def build_scene(obj: ObjectSpec | None = None) -> mujoco.MjModel:
     world.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], pos=[0, 0, -0.15],
                    rgba=[0.25, 0.3, 0.35, 1])
 
-    # grasp_site is at palm-local (0, -0.035, 0.09); palm frame is fixed at
-    # the default (zero) wrist angles, so this world position is stable.
+    # grasp_site is at palm-local (0, -0.035, 0.09); the hand's fixed starting
+    # pose puts it in front of this location.
     grasp_site = np.array([0.33701, 0.0, 0.045])
-    obj_pos = (grasp_site + np.asarray(obj.offset)).tolist()
+    if obj.shape == "mug":
+        radius, height = obj.size
+        table_top_z = MUG_TABLE_TOP_Z + obj.offset[2]
+        obj_pos = [
+            grasp_site[0] + obj.offset[0],
+            grasp_site[1] + obj.offset[1],
+            table_top_z + height / 2,
+        ]
+        world.add_geom(
+            name="mug_table",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[0.14, 0.14, 0.01],
+            pos=[obj_pos[0], obj_pos[1], table_top_z - 0.01],
+            rgba=[0.35, 0.28, 0.22, 1.0],
+            contype=4,
+            conaffinity=2,
+        )
+        mesh_scale = [radius / 0.04531, height / 0.11375, radius / 0.04531]
+        visual_z_offset = 0.004006 * mesh_scale[1]
+        spec.add_mesh(
+            name="bigym_mug_visual",
+            file=str(BIGYM_MUG_ASSETS / "mug.obj"),
+            scale=mesh_scale,
+        )
+        spec.add_texture(
+            name="bigym_mug_texture",
+            type=mujoco.mjtTexture.mjTEXTURE_2D,
+            file=str(BIGYM_MUG_ASSETS / "mug.png"),
+        )
+        spec.add_material(
+            name="bigym_mug_material",
+            textures=["bigym_mug_texture"],
+            rgba=[1.0, 1.0, 1.0, 1.0],
+        )
+    else:
+        obj_pos = (grasp_site + np.asarray(obj.offset)).tolist()
+
     body = world.add_body(name="object", pos=obj_pos)
     body.add_freejoint(name="object_free")
-    shape = {
-        "sphere": mujoco.mjtGeom.mjGEOM_SPHERE,
-        "box": mujoco.mjtGeom.mjGEOM_BOX,
-        "cylinder": mujoco.mjtGeom.mjGEOM_CYLINDER,
-        "ellipsoid": mujoco.mjtGeom.mjGEOM_ELLIPSOID,
-    }[obj.shape]
-    size = list(obj.size) + [0.0] * (3 - len(obj.size))
-    body.add_geom(name="object_geom", type=shape, size=size, mass=obj.mass,
-                  friction=list(obj.friction), rgba=list(obj.rgba),
-                  condim=6, priority=1)
+    if obj.shape == "mug":
+        body.add_geom(
+            name="mug_visual",
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            meshname="bigym_mug_visual",
+            pos=[0.0, 0.0, visual_z_offset],
+            quat=[0.5, -0.5, -0.5, 0.5],
+            mass=0.0,
+            contype=0,
+            conaffinity=0,
+            group=2,
+            material="bigym_mug_material",
+        )
+        wall = 0.006
+        color = list(obj.rgba)
+        cup_geoms = (
+            ("mug_bottom", [radius, radius, wall / 2],
+             [0, 0, -height / 2 + wall / 2], 0.20),
+            ("mug_wall_xp", [wall / 2, radius, height / 2],
+             [radius - wall / 2, 0, 0], 0.16),
+            ("mug_wall_xn", [wall / 2, radius, height / 2],
+             [-radius + wall / 2, 0, 0], 0.16),
+            ("mug_wall_yp", [radius - wall, wall / 2, height / 2],
+             [0, radius - wall / 2, 0], 0.16),
+            ("mug_wall_yn", [radius - wall, wall / 2, height / 2],
+             [0, -radius + wall / 2, 0], 0.16),
+        )
+        for name, size, pos, mass_fraction in cup_geoms:
+            body.add_geom(
+                name=name,
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=size,
+                pos=pos,
+                mass=obj.mass * mass_fraction,
+                friction=list(obj.friction),
+                rgba=color,
+                contype=2,
+                conaffinity=1,
+                condim=6,
+                priority=1,
+            )
 
-    # "Virtual experimenter": holds the object in place until released
-    # (toggle with data.eq_active[holder_eq_id]).
-    spec.add_equality(name="holder", type=mujoco.mjtEq.mjEQ_WELD,
-                      objtype=mujoco.mjtObj.mjOBJ_BODY, name1="object", name2="world",
-                      solref=[0.02, 1.0])
+        # A rounded, rigid handle extends toward the palm.
+        handle_points = (
+            (-radius + wall, 0, 0.025),
+            (-radius - 0.03, 0, 0.025),
+            (-radius - 0.03, 0, -0.025),
+            (-radius + wall, 0, -0.025),
+            (-radius + wall, 0, 0.025),
+        )
+        for index, (start, end) in enumerate(zip(handle_points, handle_points[1:])):
+            body.add_geom(
+                name=f"mug_handle_{index}",
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                size=[0.004],
+                fromto=[*start, *end],
+                mass=obj.mass * 0.04,
+                friction=list(obj.friction),
+                rgba=color,
+                contype=2,
+                conaffinity=1,
+                condim=6,
+                priority=1,
+            )
+    else:
+        shape = {
+            "sphere": mujoco.mjtGeom.mjGEOM_SPHERE,
+            "box": mujoco.mjtGeom.mjGEOM_BOX,
+            "cylinder": mujoco.mjtGeom.mjGEOM_CYLINDER,
+            "ellipsoid": mujoco.mjtGeom.mjGEOM_ELLIPSOID,
+        }[obj.shape]
+        size = list(obj.size) + [0.0] * (3 - len(obj.size))
+        body.add_geom(name="object_geom", type=shape, size=size, mass=obj.mass,
+                      friction=list(obj.friction), rgba=list(obj.rgba),
+                      condim=6, priority=1)
+
+        # The virtual experimenter holds ordinary test objects until release.
+        spec.add_equality(name="holder", type=mujoco.mjtEq.mjEQ_WELD,
+                          objtype=mujoco.mjtObj.mjOBJ_BODY, name1="object", name2="world",
+                          solref=[0.02, 1.0])
+
+    if obj.shape == "mug":
+        # Add simple forearm translations for the mug setup and vertical lift.
+        forearm = spec.body("rh_forearm")
+        forearm.add_joint(
+            name="hand_approach",
+            type=mujoco.mjtJoint.mjJNT_SLIDE,
+            axis=[0, 0, 1],
+            limited=True,
+            range=[0.0, 0.16],
+            damping=[2.0],
+        )
+        forearm.add_joint(
+            name="hand_lift",
+            type=mujoco.mjtJoint.mjJNT_SLIDE,
+            axis=[1, 0, 0],
+            limited=True,
+            range=[0.0, MUG_LIFT_MAX_M],
+            damping=[2.0],
+        )
+        position_gain = [2000.0] + [0.0] * 9
+        position_bias = [0.0, -2000.0, -50.0] + [0.0] * 7
+        spec.add_actuator(
+            name="hand_approach_act",
+            target="hand_approach",
+            trntype=mujoco.mjtTrn.mjTRN_JOINT,
+            gaintype=mujoco.mjtGain.mjGAIN_FIXED,
+            gainprm=position_gain,
+            biastype=mujoco.mjtBias.mjBIAS_AFFINE,
+            biasprm=position_bias,
+            ctrllimited=True,
+            ctrlrange=[0.0, 0.16],
+            forcelimited=True,
+            forcerange=[-500.0, 500.0],
+        )
+        spec.add_actuator(
+            name="hand_lift_act",
+            target="hand_lift",
+            trntype=mujoco.mjtTrn.mjTRN_JOINT,
+            gaintype=mujoco.mjtGain.mjGAIN_FIXED,
+            gainprm=position_gain,
+            biastype=mujoco.mjtBias.mjBIAS_AFFINE,
+            biasprm=position_bias,
+            ctrllimited=True,
+            ctrlrange=[0.0, MUG_LIFT_MAX_M],
+            forcelimited=True,
+            forcerange=[-500.0, 500.0],
+        )
 
     model = spec.compile()
     return model
@@ -97,7 +248,10 @@ def qpos_to_ctrl(model: mujoco.MjModel, hand_qpos: np.ndarray) -> np.ndarray:
     q = dict(zip(names, hand_qpos))
     ctrl = np.zeros(model.nu)
     for a in range(model.nu):
-        target = model.actuator(a).name.replace("rh_A_", "rh_")
+        actuator_name = model.actuator(a).name
+        if not actuator_name.startswith("rh_A_"):
+            continue
+        target = actuator_name.replace("rh_A_", "rh_")
         if target.endswith("J0"):
             f = target[:-2]
             ctrl[a] = q[f + "J1"] + q[f + "J2"]
